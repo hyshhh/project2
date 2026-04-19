@@ -1,18 +1,18 @@
 """
-自动构建数据库脚本 — 扫描图片目录，调用 Qwen3.5-VL 识别船只，自动生成弦号和描述并存入 CSV。
+自动构建数据库脚本 — 扫描图片目录，调用视觉模型识别船只，自动生成弦号和描述并存入 CSV。
 
 用法：
     python3 build_db.py <图片目录路径>
 
 流程：
     1. 扫描目录中所有图片
-    2. 对每张图片调用 Qwen3.5-VL 识别船只
+    2. 对每张图片调用视觉模型识别船只
     3. 生成弦号和描述
-    4. 检查弦号是否已存在
+    4. 检查弦号是否已存在（所有场景均查重）
     5. 询问用户确认弦号是否正确
-       - 按 1：确认，继续下一张
-       - 按 2：手动输入正确弦号
-    6. 存入 CSV，继续下一张
+       - 按 1：确认 / 跳过
+       - 按 2：覆盖 / 手动输入
+    6. 立即写入 CSV，继续下一张
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ def recognize_ship(image_path: Path, llm: ChatOpenAI) -> dict:
     try:
         result = json.loads(content)
     except json.JSONDecodeError:
-        match = re.search(r'\{[^}]+\}', content, re.DOTALL)
+        match = re.search(r'\{.*\}', content, re.DOTALL)
         if match:
             try:
                 result = json.loads(match.group())
@@ -264,15 +264,37 @@ def main() -> None:
                     break
                 elif choice == "3":
                     hull_number = confirm_hull_number("")
-                    if hull_number:
+                    if hull_number and hull_number in existing:
+                        console.print(f"\n  ⚠️  手动弦号 [{hull_number}] 也已存在")
+                        console.print(f"     现有描述: {existing[hull_number]}")
+                        console.print("  按 [bold green]1[/bold green] 跳过（保留原记录）")
+                        console.print("  按 [bold yellow]2[/bold yellow] 覆盖为新描述")
+                        try:
+                            sub_choice = Prompt.ask("  请选择", choices=["1", "2"], default="1")
+                        except (KeyboardInterrupt, EOFError):
+                            console.print("\n  [yellow]已取消，跳过[/yellow]")
+                            skip_count += 1
+                            break
+                        if sub_choice == "1":
+                            console.print("  ⏭️  已跳过")
+                            skip_count += 1
+                            break
+                        else:
+                            existing[hull_number] = description
+                            _rewrite_csv(csv_path, existing)
+                            console.print(f"  ✅ 已覆盖弦号 [{hull_number}]")
+                            success_count += 1
+                            break
+                    elif hull_number:
                         existing[hull_number] = description
                         _rewrite_csv(csv_path, existing)
                         console.print(f"  ✅ 已保存弦号 [{hull_number}]")
                         success_count += 1
+                        break
                     else:
                         console.print("  ⏭️  弦号为空，已跳过")
                         skip_count += 1
-                    break
+                        break
         else:
             # 3. 新弦号，确认是否正确
             hull_number = confirm_hull_number(hull_number)
@@ -280,19 +302,43 @@ def main() -> None:
             if hull_number:
                 # 检查手动输入的弦号是否也已存在
                 if hull_number in existing:
-                    console.print(f"\n  ⚠️  弦号 [{hull_number}] 已存在，将覆盖")
+                    console.print(f"\n  ⚠️  弦号 [{hull_number}] 已存在")
                     console.print(f"     现有描述: {existing[hull_number]}")
-
-                existing[hull_number] = description
-                _rewrite_csv(csv_path, existing)
-                console.print(f"  ✅ 已保存弦号 [{hull_number}]")
-                success_count += 1
+                    console.print("  按 [bold green]1[/bold green] 跳过（保留原记录）")
+                    console.print("  按 [bold yellow]2[/bold yellow] 覆盖为新描述")
+                    try:
+                        choice = Prompt.ask("  请选择", choices=["1", "2"], default="1")
+                    except (KeyboardInterrupt, EOFError):
+                        console.print("\n  [yellow]已取消，跳过[/yellow]")
+                        skip_count += 1
+                        choice = "1"
+                    if choice == "1":
+                        console.print("  ⏭️  已跳过")
+                        skip_count += 1
+                    else:
+                        existing[hull_number] = description
+                        _rewrite_csv(csv_path, existing)
+                        console.print(f"  ✅ 已覆盖弦号 [{hull_number}]")
+                        success_count += 1
+                else:
+                    existing[hull_number] = description
+                    _rewrite_csv(csv_path, existing)
+                    console.print(f"  ✅ 已保存弦号 [{hull_number}]")
+                    success_count += 1
             else:
                 # 无弦号，仅保存描述（用图片名作为键）
                 fallback_key = image_path.stem
+                if fallback_key in existing:
+                    # 生成唯一 key: 文件名 + 序号
+                    i = 2
+                    while f"{fallback_key}_{i}" in existing:
+                        i += 1
+                    fallback_key = f"{fallback_key}_{i}"
+                    console.print(f"\n  ⚠️  文件名已用作弦号，自动改为 [{fallback_key}]")
+
                 existing[fallback_key] = description
                 _rewrite_csv(csv_path, existing)
-                console.print(f"  ✅ 已保存（使用文件名 [{fallback_key}] 作为弦号）")
+                console.print(f"  ✅ 已保存（使用 [{fallback_key}] 作为弦号）")
                 success_count += 1
 
         console.print()
@@ -307,8 +353,9 @@ def main() -> None:
     console.print(f"{'='*60}")
 
 
-def _rewrite_csv(csv_path: Path, data: dict[str, str]) -> None:
-    """原子写入 CSV 文件（先写临时文件再重命名，防止写入中断导致数据丢失）。"""
+def _rewrite_csv(csv_path: Path, data: dict[str, str]) -> bool:
+    """原子写入 CSV 文件（先写临时文件再重命名，防止写入中断导致数据丢失）。
+    返回 True 成功，False 失败。"""
     tmp_path = csv_path.with_suffix(".csv.tmp")
     try:
         with open(tmp_path, "w", encoding="utf-8", newline="") as f:
@@ -316,11 +363,15 @@ def _rewrite_csv(csv_path: Path, data: dict[str, str]) -> None:
             writer.writerow(["hull_number", "description"])
             for hn, desc in data.items():
                 writer.writerow([hn, desc])
-    except Exception:
+    except Exception as e:
         if tmp_path.exists():
             tmp_path.unlink()
-        raise
+        console.print(f"  [red]⚠️  写入 CSV 失败: {e}[/red]")
+        console.print("  [yellow]数据仍在内存中，下次成功写入时会自动保存[/yellow]")
+        logger.error("写入 CSV 失败: %s", e)
+        return False
     tmp_path.replace(csv_path)
+    return True
 
 
 if __name__ == "__main__":
