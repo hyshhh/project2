@@ -26,7 +26,10 @@ ship-hull = "cli.main:app"
 ship-build-db = "build_db:main"
 
 [tool.setuptools.packages.find]
-include = ["database*", "tools*", "agent*", "cli*", "config*"]
+include = ["database*", "tools*", "agent*", "cli*"]
+
+[tool.setuptools]
+py-modules = ["config"]
 
 [build-system]
 requires = ["setuptools>=68"]
