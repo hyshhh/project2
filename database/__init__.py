@@ -37,6 +37,11 @@ class DashScopeEmbeddings(Embeddings):
     """DashScope Embedding 封装，直接调用 OpenAI 兼容模式 API。"""
 
     def __init__(self, model: str, api_key: str, base_url: str):
+        if not api_key or api_key.startswith("your-"):
+            raise ValueError(
+                "Embedding API Key 未配置。请在 config.yaml 中设置 embed.api_key，"
+                "或在 .env 中设置 EMBED_API_KEY。"
+            )
         self.model = model
         self.api_key = api_key
         self._url = f"{base_url.rstrip('/')}/embeddings"
@@ -69,6 +74,16 @@ class DashScopeEmbeddings(Embeddings):
                     logger.warning("Embedding API 服务错误 [%d]，%ds 后重试 (%d/%d)", resp.status_code, 2 ** attempt, attempt + 1, max_retries)
                     time.sleep(2 ** attempt)
                     continue
+                if not resp.is_success:
+                    try:
+                        err_body = resp.json()
+                        err_msg = err_body.get("error", {}).get("message", resp.text[:300])
+                    except Exception:
+                        err_msg = resp.text[:300]
+                    raise RuntimeError(
+                        f"Embedding API 返回 {resp.status_code}: {err_msg}\n"
+                        f"请检查 config.yaml 中 embed 配置（model / api_key / base_url）。"
+                    )
                 resp.raise_for_status()
                 data = resp.json()
                 return [item["embedding"] for item in data["data"]]
